@@ -1,4 +1,4 @@
-# ZeroTrust TradeCore
+# Trading Enigine
 
 An enterprise-grade, high-performance C++ trading engine paired with a robust zero-trust CI/CD pipeline for automated, secure, and resilient deployments.
 
