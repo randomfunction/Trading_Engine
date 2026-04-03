@@ -1,5 +1,7 @@
 #include "order_book.h"
 #include <algorithm>
+#include <chrono>
+#include <iostream>
 
 OrderBook::OrderBook() : buy_bitmap(MAX_PRICE_LEVELS), sell_bitmap(MAX_PRICE_LEVELS) {
     book.resize(MAX_PRICE_LEVELS);
@@ -24,6 +26,7 @@ Order* OrderBook::allocateOrder() {
 
 void OrderBook::freeOrder(Order* order) {
     if (!order) return;
+    Metrics::instance().order_book_depth.Decrement();
     if (order_map.find(order->id) != order_map.end()) {
         order_map.erase(order->id);
     }
@@ -55,6 +58,9 @@ void OrderBook::removeOrderFromList(Order* order) {
 }
 
 bool OrderBook::addOrder(OrderId id, Price price, Quantity quantity, bool is_buy) {
+    Metrics::instance().orders_received.Increment();
+    auto start = std::chrono::high_resolution_clock::now();
+
     if (price >= static_cast<Price>(MAX_PRICE_LEVELS)) {
         std::cerr << "Order rejected: Price bounds exceeded.\n";
         return false;
@@ -63,6 +69,7 @@ bool OrderBook::addOrder(OrderId id, Price price, Quantity quantity, bool is_buy
     Order* order = allocateOrder();
     if (!order) return false;
 
+    Metrics::instance().order_book_depth.Increment();
     order->id = id;
     order->price = price;
     order->quantity = quantity;
@@ -83,6 +90,10 @@ bool OrderBook::addOrder(OrderId id, Price price, Quantity quantity, bool is_buy
     }
 
     match();
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    Metrics::instance().match_latency.Observe(elapsed.count());
     return true;
 }
 
@@ -96,6 +107,7 @@ void OrderBook::cancelOrder(OrderId id) {
 }
 
 void OrderBook::match() {
+    uint32_t initial_trades = trades_executed;
     while (true) {
         int highest_buy_idx = buy_bitmap.get_highest();
         int lowest_sell_idx = sell_bitmap.get_lowest();
@@ -128,5 +140,8 @@ void OrderBook::match() {
             removeOrderFromList(sell_order);
             freeOrder(sell_order);
         }
+    }
+    if (trades_executed > initial_trades) {
+        Metrics::instance().trades_executed.Increment(trades_executed - initial_trades);
     }
 }

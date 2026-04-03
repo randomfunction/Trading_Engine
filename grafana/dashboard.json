@@ -1,0 +1,28 @@
+{
+  "title": "Trading Engine Metrics",
+  "panels": [
+    {
+      "title": "Requests Per Second",
+      "targets": [
+        { "expr": "rate(trading_orders_total[1m])", "legendFormat": "Orders/s" },
+        { "expr": "rate(trading_trades_total[1m])", "legendFormat": "Trades/s" }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "title": "p99 Matching Latency",
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(trading_match_latency_seconds_bucket[1m])) by (le))" }
+      ],
+      "type": "timeseries",
+      "unit": "s"
+    },
+    {
+      "title": "Order Book Depth",
+      "targets": [
+        { "expr": "trading_order_book_depth" }
+      ],
+      "type": "gauge"
+    }
+  ]
+}

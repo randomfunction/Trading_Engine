@@ -1,0 +1,17 @@
+name: Production CI
+on: [push]
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build & Unit Test
+        run: |
+          docker build --target builder -t engine-tester .
+          docker run engine-tester ./engine --test
+      - name: Security Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'trading-engine:latest'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
