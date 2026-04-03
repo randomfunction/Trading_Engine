@@ -1,33 +1,33 @@
 #pragma once
 #include "types.h"
-#include "fast_bitmap.h"
 #include "metrics.h"
-#include <vector>
+#include <map>
+#include <queue>
 #include <unordered_map>
-#include <chrono>
-
-struct LevelData {
-    Order* head = nullptr;
-    Order* tail = nullptr;
-};
+#include <iostream>
 
 class OrderBook {
-    std::vector<LevelData> book;
-    std::unordered_map<OrderId, Order*> order_map;
-    std::vector<Order> order_pool;
-    Order* free_list_head = nullptr;
-    FastBitmap buy_bitmap;
-    FastBitmap sell_bitmap;
-    uint32_t trades_executed = 0;
+private:
+    // Bids (buys): sorted in descending order (highest price first)
+    std::map<Price, std::queue<Order>, std::greater<Price>> bids;
+    
+    // Asks (sells): sorted in ascending order (lowest price first)
+    std::map<Price, std::queue<Order>> asks;
 
-    Order* allocateOrder();
-    void freeOrder(Order* order);
-    void removeOrderFromList(Order* order);
+    // Fast lookup map to track if an order is still active (lazy cancellation)
+    std::unordered_map<OrderId, bool> active_orders;
+
+    uint32_t trades_executed = 0;
+    uint64_t current_timestamp = 0;
 
 public:
-    OrderBook();
-    bool addOrder(OrderId id, Price price, Quantity quantity, bool is_buy);
-    void cancelOrder(OrderId id);
-    void match();
-    uint32_t getTrades() const { return trades_executed; }
+    OrderBook() = default;
+    
+    // Core requirements
+    bool add_order(OrderId id, Price price, Quantity quantity, bool is_buy);
+    void match_order();
+    void cancel_order(OrderId id);
+    void print_order_book() const;
+    
+    uint32_t get_trades() const { return trades_executed; }
 };

@@ -3,145 +3,164 @@
 #include <chrono>
 #include <iostream>
 
-OrderBook::OrderBook() : buy_bitmap(MAX_PRICE_LEVELS), sell_bitmap(MAX_PRICE_LEVELS) {
-    book.resize(MAX_PRICE_LEVELS);
-    order_pool.resize(MAX_ORDERS);
-    
-    for (size_t i = 0; i < MAX_ORDERS - 1; ++i) {
-        order_pool[i].next = &order_pool[i + 1];
-    }
-    order_pool[MAX_ORDERS - 1].next = nullptr;
-    free_list_head = &order_pool[0];
-}
-
-Order* OrderBook::allocateOrder() {
-    if (!free_list_head) return nullptr; 
-    Order* node = free_list_head;
-    free_list_head = free_list_head->next;
-    
-    node->prev = nullptr;
-    node->next = nullptr;
-    return node;
-}
-
-void OrderBook::freeOrder(Order* order) {
-    if (!order) return;
-    Metrics::instance().order_book_depth.Decrement();
-    if (order_map.find(order->id) != order_map.end()) {
-        order_map.erase(order->id);
-    }
-    order->next = free_list_head;
-    free_list_head = order;
-}
-
-void OrderBook::removeOrderFromList(Order* order) {
-    Price p = order->price;
-    if (order->prev) {
-        order->prev->next = order->next;
-    } else {
-        book[p].head = order->next;
-    }
-
-    if (order->next) {
-        order->next->prev = order->prev;
-    } else {
-        book[p].tail = order->prev;
-    }
-
-    if (book[p].head == nullptr) {
-        if (order->is_buy) {
-            buy_bitmap.reset(p);
-        } else {
-            sell_bitmap.reset(p);
-        }
-    }
-}
-
-bool OrderBook::addOrder(OrderId id, Price price, Quantity quantity, bool is_buy) {
+bool OrderBook::add_order(OrderId id, Price price, Quantity quantity, bool is_buy) {
     Metrics::instance().orders_received.Increment();
     auto start = std::chrono::high_resolution_clock::now();
 
-    if (price >= static_cast<Price>(MAX_PRICE_LEVELS)) {
-        std::cerr << "Order rejected: Price bounds exceeded.\n";
-        return false;
-    }
+    // Create the order with an incrementing timestamp
+    Order order = {id, price, quantity, is_buy, ++current_timestamp};
 
-    Order* order = allocateOrder();
-    if (!order) return false;
-
+    // Mark as active in the system
+    active_orders[id] = true;
     Metrics::instance().order_book_depth.Increment();
-    order->id = id;
-    order->price = price;
-    order->quantity = quantity;
-    order->is_buy = is_buy;
 
-    order_map[id] = order;
-
-    LevelData& level = book[price];
-    if (level.tail) {
-        level.tail->next = order;
-        order->prev = level.tail;
-        level.tail = order;
+    // Place the order in the appropriate queue
+    if (is_buy) {
+        bids[price].push(order);
     } else {
-        level.head = order;
-        level.tail = order;
-        if (is_buy) buy_bitmap.set(price);
-        else sell_bitmap.set(price);
+        asks[price].push(order);
     }
 
-    match();
+    // After adding, always try to match the order book
+    match_order();
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
     Metrics::instance().match_latency.Observe(elapsed.count());
+    
     return true;
 }
 
-void OrderBook::cancelOrder(OrderId id) {
-    auto it = order_map.find(id);
-    if (it != order_map.end()) {
-        Order* order = it->second;
-        removeOrderFromList(order);
-        freeOrder(order);
+void OrderBook::cancel_order(OrderId id) {
+    // Lazy cancellation: we just mark the order as inactive by ID.
+    // The physical order will be thrown away when it reaches the front of its queue.
+    auto it = active_orders.find(id);
+    if (it != active_orders.end() && it->second) {
+        it->second = false; // Mark inactive
+        Metrics::instance().order_book_depth.Decrement();
     }
 }
 
-void OrderBook::match() {
+void OrderBook::match_order() {
     uint32_t initial_trades = trades_executed;
-    while (true) {
-        int highest_buy_idx = buy_bitmap.get_highest();
-        int lowest_sell_idx = sell_bitmap.get_lowest();
 
-        if (highest_buy_idx == -1 || lowest_sell_idx == -1) break;
-        if (highest_buy_idx < lowest_sell_idx) break;
+    // Keep matching as long as there are both bids and asks
+    while (!bids.empty() && !asks.empty()) {
+        auto best_bid_it = bids.begin();
+        auto best_ask_it = asks.begin();
 
-        LevelData& buy_level = book[highest_buy_idx];
-        LevelData& sell_level = book[lowest_sell_idx];
+        Price best_bid_price = best_bid_it->first;
+        Price best_ask_price = best_ask_it->first;
 
-        Order* buy_order = buy_level.head;
-        Order* sell_order = sell_level.head;
-
-        if (!buy_order || !sell_order) {
-            if (!buy_order) buy_bitmap.reset(highest_buy_idx);
-            if (!sell_order) sell_bitmap.reset(lowest_sell_idx);
-            continue;
+        // Highest bid is lower than lowest ask -> no crossed market, stop matching
+        if (best_bid_price < best_ask_price) {
+            break;
         }
 
-        uint32_t traded = std::min(buy_order->quantity, sell_order->quantity);
-        buy_order->quantity -= traded;
-        sell_order->quantity -= traded;
+        auto& bid_queue = best_bid_it->second;
+        auto& ask_queue = best_ask_it->second;
+
+        // Clean out any cancelled orders at the front of the best bid queue
+        while (!bid_queue.empty() && !active_orders[bid_queue.front().id]) {
+            bid_queue.pop();
+        }
+        
+        // Clean out any cancelled orders at the front of the best ask queue
+        while (!ask_queue.empty() && !active_orders[ask_queue.front().id]) {
+            ask_queue.pop();
+        }
+
+        // Check if either queue became empty, and remove the level if so
+        if (bid_queue.empty()) {
+            bids.erase(best_bid_it);
+            continue; // Re-evaluate market state
+        }
+        if (ask_queue.empty()) {
+            asks.erase(best_ask_it);
+            continue; // Re-evaluate market state
+        }
+
+        // Both top orders are active and prices cross -> Execute a Trade!
+        Order& top_bid = bid_queue.front();
+        Order& top_ask = ask_queue.front();
+
+        // The traded quantity is the minimum of both available quantities
+        Quantity traded_qty = std::min(top_bid.quantity, top_ask.quantity);
+        
+        // Deduct traded quantity (in-place modification via reference)
+        top_bid.quantity -= traded_qty;
+        top_ask.quantity -= traded_qty;
         trades_executed++;
 
-        if (buy_order->quantity == 0) {
-            removeOrderFromList(buy_order);
-            freeOrder(buy_order);
+        // If bid order is fully filled, remove it
+        if (top_bid.quantity == 0) {
+            active_orders[top_bid.id] = false;
+            Metrics::instance().order_book_depth.Decrement();
+            bid_queue.pop();
+            if (bid_queue.empty()) {
+                bids.erase(best_bid_it);
+            }
         }
-        if (sell_order->quantity == 0) {
-            removeOrderFromList(sell_order);
-            freeOrder(sell_order);
+        
+        // If ask order is fully filled, remove it
+        if (top_ask.quantity == 0) {
+            active_orders[top_ask.id] = false;
+            Metrics::instance().order_book_depth.Decrement();
+            ask_queue.pop();
+            if (ask_queue.empty()) {
+                asks.erase(best_ask_it);
+            }
         }
     }
+
     if (trades_executed > initial_trades) {
         Metrics::instance().trades_executed.Increment(trades_executed - initial_trades);
     }
+}
+
+void OrderBook::print_order_book() const {
+    std::cout << "=== ORDER BOOK ===\n";
+    
+    std::cout << "--- ASKS ---\n";
+    // Asks map is ascending. We print reverse so the highest ask is printed first (top of visually appealing book)
+    for (auto it = asks.rbegin(); it != asks.rend(); ++it) {
+        Price price = it->first;
+        std::queue<Order> temp_queue = it->second; 
+        Quantity total_qty = 0;
+        
+        while (!temp_queue.empty()) {
+            const Order& order = temp_queue.front();
+            if (active_orders.at(order.id)) {
+                total_qty += order.quantity;
+            }
+            temp_queue.pop();
+        }
+        
+        if (total_qty > 0) {
+            std::cout << "Price: " << price << " | Qty: " << total_qty << "\n";
+        }
+    }
+    
+    std::cout << "------------\n";
+    std::cout << "--- BIDS ---\n";
+    
+    // Bids map is descending. Normal iteration prints highest bids first.
+    for (const auto& [price, queue_orig] : bids) {
+        std::queue<Order> temp_queue = queue_orig; 
+        Quantity total_qty = 0;
+        
+        while (!temp_queue.empty()) {
+            const Order& order = temp_queue.front();
+            if (active_orders.at(order.id)) {
+                total_qty += order.quantity;
+            }
+            temp_queue.pop();
+        }
+        
+        if (total_qty > 0) {
+            std::cout << "Price: " << price << " | Qty: " << total_qty << "\n";
+        }
+    }
+    
+    std::cout << "==================\n";
 }
