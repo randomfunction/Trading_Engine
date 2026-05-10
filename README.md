@@ -1,7 +1,7 @@
 # Small Low-Latency Matching Engine
 
 A compact C++17 matching engine prototype built for low-latency systems learning and interview discussion.  
-It focuses on a small set of high-signal ideas: single-writer ownership, lock-free SPSC handoff, cache-aware data structures, bounded memory, and replayable benchmarking.  
+It focuses on a small set of high-signal ideas: single-writer ownership, lock-free SPSC handoff, bounded memory, simple data layouts, and replayable benchmarking.  
 The goal is depth, not scope: one symbol, one process, one matching thread, and a codebase that can be understood end-to-end.
 
 ## Overview
@@ -23,7 +23,7 @@ It is not trying to look like a production exchange or a distributed trading pla
 - Single-writer ownership of the order book
 - Lock-free single-producer / single-consumer queueing
 - Fixed-size object-pool allocation for order storage
-- Cache-aware ladder-based order book layout
+- Ladder-based order book layout over a bounded price range
 - Reproducible replay and benchmark runs
 - Careful, caveated performance measurement
 
@@ -51,6 +51,7 @@ Design rules:
 - The queue is bounded and preallocated.
 - The order book uses bounded in-memory storage.
 - Input is replayed in a totally ordered sequence.
+- Queue synchronization uses acquire / release atomics only.
 
 This keeps the concurrency model simple while preserving the core low-latency ideas that actually matter.
 
@@ -63,7 +64,7 @@ The hot-path handoff uses a bounded single-producer / single-consumer ring:
 - no mutexes in the handoff path
 - fixed capacity
 - cache-line-separated producer / consumer state
-- simple memory-ordering model
+- acquire / release synchronization only
 
 ### `Single-writer matching core`
 
@@ -80,6 +81,7 @@ The book is designed around a bounded price range:
 - direct price-to-index mapping
 - FIFO behavior at each price level
 - direct order-id lookup for cancel / modify
+- index-linked intrusive lists instead of heap pointers
 - less pointer-heavy access than tree-based containers
 
 ### `Fixed-size object pool`
@@ -89,6 +91,18 @@ Orders are stored in a bounded pool:
 - no steady-state heap allocation in the hot path
 - explicit capacity limits
 - easier lifetime reasoning
+
+## Design Tradeoffs
+
+This project chooses a few narrow designs on purpose.
+
+- `SPSC` instead of `MPMC`: one producer and one consumer are enough for this prototype, and the implementation is smaller, easier to verify, and cheaper to synchronize.
+- Single-writer matching: one thread owns the book so correctness is easier to reason about and the hot path avoids lock contention entirely.
+- One symbol: this keeps the matching logic, price ladder, and replay behavior easy to understand without introducing routing or sharding complexity.
+- Bounded price ladder instead of a general-purpose tree: the code assumes a known price range and trades flexibility for direct indexing and simpler traversal.
+- Bounded memory and object pools: capacity is explicit, allocator noise is removed from steady-state processing, and failure modes are easier to reason about.
+
+These are not universal choices. They are choices that fit a small, measurable systems project.
 
 ## Mechanical Sympathy
 
@@ -101,6 +115,7 @@ This project intentionally keeps only a few high-signal low-latency techniques:
 - reduced pointer chasing
 - allocator avoidance after initialization
 - deterministic event ordering
+- simple branch structure in common paths
 
 The goal is not to include every advanced optimization. The goal is to implement a few important ones well enough to explain and measure honestly.
 
@@ -115,12 +130,13 @@ The goal is not to include every advanced optimization. The goal is to implement
 │   ├── replay_main.cpp
 │   └── tests_main.cpp
 ├── include/llx/
+│   ├── bench/
 │   ├── book/
 │   ├── core/
 │   ├── memory/
-│   ├── metrics/
+│   ├── os/
 │   ├── queue/
-│   └── util/
+│   └── time/
 └── src/
     ├── book/
     └── core/
@@ -191,6 +207,7 @@ The benchmark harness is useful today for:
 - regression tracking
 - replay-driven performance comparison
 - validating that structural changes improve or degrade throughput
+- release-mode baseline measurements
 
 Current caveats:
 
@@ -198,6 +215,7 @@ Current caveats:
 - scheduler noise still exists
 - benchmark methodology is still being tightened
 - latency percentiles are prototype-stage measurements, not polished claims
+- fixed-capacity queue behavior can influence results under sustained backpressure
 
 Planned improvements:
 
