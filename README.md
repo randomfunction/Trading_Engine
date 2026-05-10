@@ -1,51 +1,35 @@
 # Small Low-Latency Matching Engine
 
-A compact C++17 matching engine prototype for low-latency systems practice.
+A compact C++17 matching engine prototype built for low-latency systems learning and interview discussion.  
+It focuses on a small set of high-signal ideas: single-writer ownership, lock-free SPSC handoff, cache-aware data structures, bounded memory, and replayable benchmarking.  
+The goal is depth, not scope: one symbol, one process, one matching thread, and a codebase that can be understood end-to-end.
 
-The project is intentionally small in scope:
+## Overview
 
-- one process
-- one symbol
-- one matching thread
-- one SPSC queue
-- one replay / benchmark driver
-- one bounded in-memory order book
+This project is a deliberately small low-latency engine prototype.
 
-The goal is not to imitate a full exchange. The goal is to build a small system that is deeply understood, mechanically sympathetic, and benchmarked carefully.
+It is designed to be:
 
-## Why This Shape
+- understandable by one developer
+- realistic for a strong student / new-grad systems project
+- technically credible for HFT and performance-focused backend interviews
+- implementation-focused rather than architecture-heavy
 
-For a student or new-grad systems project, breadth is often less convincing than depth.
+It is not trying to look like a production exchange or a distributed trading platform.
 
-This repository focuses on a few high-signal ideas and implements them cleanly:
+## What This Project Demonstrates
 
-- deterministic price-time matching
-- single-writer ownership of mutable book state
-- lock-free SPSC queue between producer and matcher
-- fixed-size object pool for order storage
-- cache-aware price ladder instead of tree-based containers
-- replayable benchmark input
-- bounded memory and allocator avoidance in the hot path
+- Deterministic price-time-priority matching
+- Single-writer ownership of the order book
+- Lock-free single-producer / single-consumer queueing
+- Fixed-size object-pool allocation for order storage
+- Cache-aware ladder-based order book layout
+- Reproducible replay and benchmark runs
+- Careful, caveated performance measurement
 
-Everything here should be explainable line-by-line in an interview.
+## Architecture
 
-## What It Is
-
-This is a single-host prototype designed to answer a narrow question:
-
-What does a small but technically serious low-latency matching engine look like when built by one person with attention to data layout, ownership, and measurement?
-
-It is not:
-
-- a distributed system
-- a fake exchange platform
-- a market-data infrastructure project
-- a persistence or journaling project
-- a production claim
-
-## Final Architecture
-
-The system is intentionally minimal.
+The system is intentionally minimal:
 
 ```text
 replay / benchmark driver
@@ -62,80 +46,63 @@ replay / benchmark driver
 
 Design rules:
 
-- the benchmark driver is the single producer
-- the matching core is the single consumer
-- only the matching thread mutates book state
-- the queue is bounded and preallocated
-- the order book uses preallocated storage
-- replay input is totally ordered and deterministic
+- One producer thread feeds commands into the queue.
+- One consumer thread owns and mutates all book state.
+- The queue is bounded and preallocated.
+- The order book uses bounded in-memory storage.
+- Input is replayed in a totally ordered sequence.
 
-This keeps the concurrency model simple enough to reason about while still preserving real low-latency systems concepts.
+This keeps the concurrency model simple while preserving the core low-latency ideas that actually matter.
 
-## Core Components
+## Core Ideas
 
-### `SpscRing`
+### `SPSC ring buffer`
 
-A bounded single-producer / single-consumer ring buffer used to feed commands into the matching thread.
-
-Why it matters:
+The hot-path handoff uses a bounded single-producer / single-consumer ring:
 
 - no mutexes in the handoff path
 - fixed capacity
-- cache-line-separated producer and consumer indices
-- simple enough to inspect and reason about completely
+- cache-line-separated producer / consumer state
+- simple memory-ordering model
 
-### `LadderBook`
+### `Single-writer matching core`
 
-A one-symbol in-memory order book with price-time-priority matching.
+Only one thread mutates the book:
 
-Current design:
+- simpler correctness story
+- no shared-state locking in the hot path
+- deterministic command processing
 
-- dense price ladder over a bounded price range
+### `Ladder-based order book`
+
+The book is designed around a bounded price range:
+
 - direct price-to-index mapping
-- FIFO per price level
+- FIFO behavior at each price level
 - direct order-id lookup for cancel / modify
-- intrusive links using indices rather than heap-allocated nodes
+- less pointer-heavy access than tree-based containers
 
-Why it matters:
+### `Fixed-size object pool`
 
-- predictable access patterns
-- avoids `std::map` in the hot path
-- keeps traversal more contiguous and less pointer-heavy
+Orders are stored in a bounded pool:
 
-### `ObjectPool`
-
-A fixed-size pool used to store order nodes.
-
-Why it matters:
-
-- avoids heap allocation during steady-state matching
-- bounds memory usage
-- makes lifetime behavior explicit
-
-### `MatchingEngine`
-
-A small wrapper around the book that consumes ordered commands and emits deterministic reports.
-
-Why it matters:
-
-- separates command processing from the benchmark driver
-- keeps single-writer ownership explicit
-- makes replay and tests straightforward
+- no steady-state heap allocation in the hot path
+- explicit capacity limits
+- easier lifetime reasoning
 
 ## Mechanical Sympathy
 
-This project keeps only the low-latency ideas that are high-signal and realistic at this size:
+This project intentionally keeps only a few high-signal low-latency techniques:
 
 - cache-line padding on hot queue state
 - producer / consumer index separation to reduce false sharing
-- contiguous arrays for price levels and object storage
+- contiguous arrays for price levels and pooled objects
 - bounded memory usage
-- minimizing pointer chasing in book traversal
-- avoiding allocator traffic after initialization
+- reduced pointer chasing
+- allocator avoidance after initialization
 - deterministic event ordering
-- simple branch structure in the common add / match paths
 
-The point is not to use every optimization technique. The point is to choose a few that materially affect behavior and can be defended clearly.
+The goal is not to include every advanced optimization. The goal is to implement a few important ones well enough to explain and measure honestly.
 
 ## Repository Layout
 
@@ -159,8 +126,6 @@ The point is not to use every optimization technique. The point is to choose a f
     └── core/
 ```
 
-This layout is intentionally small. There is no infrastructure layer, deployment folder, or extra architecture scaffolding.
-
 ## Build
 
 ```bash
@@ -168,31 +133,25 @@ cmake -S . -B build-llx
 cmake --build build-llx -j
 ```
 
-Available binaries:
+## Run
 
-- `llx_tests`
-- `llx_replay`
-- `llx_bench`
+### Tests
 
-## What The Binaries Do
+```bash
+./build-llx/llx_tests
+```
 
-### `llx_tests`
+### Deterministic replay
 
-Small correctness checks for add, cancel, modify, and matching behavior.
+```bash
+./build-llx/llx_replay
+```
 
-### `llx_replay`
+### Benchmark
 
-Runs a fixed deterministic command stream through the engine and prints a compact correctness summary.
-
-### `llx_bench`
-
-Runs a bounded replay-style benchmark:
-
-- one producer thread pushes commands into the SPSC ring
-- one matching thread consumes and processes them
-- warmup traffic is sent first
-- measured traffic is recorded separately
-- throughput and prototype latency summaries are emitted
+```bash
+./build-llx/llx_bench
+```
 
 ## Latest Verified Outputs
 
@@ -200,19 +159,11 @@ Verified locally on May 11, 2026 from the current `build-llx` tree.
 
 ### `llx_tests`
 
-```bash
-./build-llx/llx_tests
-```
-
 ```text
 llx_tests: passed
 ```
 
 ### `llx_replay`
-
-```bash
-./build-llx/llx_replay
-```
 
 ```text
 Replay complete
@@ -223,11 +174,7 @@ Reports: 9
 
 ### `llx_bench`
 
-```bash
-./build-llx/llx_bench
-```
-
-Observed baseline from the latest run:
+Latest baseline run:
 
 - `warmup_orders = 20000`
 - `measured_orders = 200000`
@@ -235,120 +182,52 @@ Observed baseline from the latest run:
 - `fills_seen = 192500`
 - `throughput_msgs_per_sec ~= 3.52e+06`
 
-The benchmark binary also prints prototype latency summaries, but those are intentionally not treated as stable README claims yet. At this stage they are more useful for local regression tracking than for headline performance numbers.
+The benchmark binary also prints prototype latency summaries, but those are not treated as stable headline claims yet.
 
-## Determinism And Replay
+## Benchmark Notes
 
-Determinism is a first-class design constraint.
+The benchmark harness is useful today for:
 
-- input commands are totally ordered
-- one matching thread processes them in sequence
-- there is no concurrent mutation of book state
-- the same replay stream should produce the same matching behavior
+- regression tracking
+- replay-driven performance comparison
+- validating that structural changes improve or degrade throughput
 
-This matters because reproducibility is what makes optimization work credible. If a benchmark run is not stable enough to compare before/after behavior, it is much less useful.
-
-## Benchmarking Philosophy
-
-The benchmark harness is intentionally modest and explicit.
-
-What it tries to measure:
-
-- steady-state throughput
-- replay-driven engine behavior
-- the effect of one queue handoff plus one matching thread
-- prototype latency distribution
-
-What it does not claim yet:
-
-- production-grade latency numbers
-- scheduler-noise-free measurements
-- calibrated cycle-accurate timing
-- exchange-like tail guarantees
-
-Current measurement caveats:
+Current caveats:
 
 - wall-clock timestamps are still used
-- Linux scheduling noise still exists
-- the harness is useful for regression tracking more than final performance claims
-- percentile results should be treated as prototype-stage until timing methodology is tightened further
+- scheduler noise still exists
+- benchmark methodology is still being tightened
+- latency percentiles are prototype-stage measurements, not polished claims
 
-Near-term rigor improvements:
+Planned improvements:
 
 - stronger warmup discipline
-- isolated core runs
-- release/LTO-only benchmark reporting
+- isolated-core benchmark runs
+- release/LTO-only reporting
 - TSC-based timing experiments
-- repeatability checks across multiple runs
-- clearer coordinated-omission discussion
+- repeatability checks across runs
 
-## Current Implementation Scope
+## Why This Project Is Credible
 
-The project is intentionally limited to a believable student-sized target:
+This project is intentionally small enough to understand fully, but still interesting enough to discuss in a serious systems interview.
+
+The value is not “big architecture.” The value is:
+
+- careful scope control
+- good data-structure choices
+- honest measurement
+- clear ownership and concurrency boundaries
+- a codebase that can be defended line-by-line
+
+## Current Scope
+
+The project intentionally stops at:
 
 - one symbol
-- one bounded price range
-- one SPSC queue
+- one process
+- one queue
 - one matching thread
+- one bounded in-memory book
 - replay-generated traffic
-- in-memory only
 
-That scope is a feature, not a limitation. It makes the system easier to understand deeply and optimize honestly.
-
-## Minimal High-Signal Feature Set
-
-The feature set I want this project to stop at, unless each addition is well justified:
-
-- deterministic add / cancel / modify / match
-- bounded lock-free SPSC queue
-- fixed-size object pool
-- ladder-based order book
-- direct order-id lookup
-- replayable benchmark harness
-- correctness tests
-- careful benchmark notes
-
-Anything beyond that should earn its complexity.
-
-## Performance Goals
-
-The project should be ambitious but believable.
-
-Good goals for this prototype:
-
-- zero allocator activity in the hot path after startup
-- stable correctness under replay
-- measurable throughput improvements from structural changes
-- clear before/after benchmark evidence for optimizations
-- latency methodology that becomes more rigorous over time
-
-The most valuable outcome is not a huge number in the README. It is a small codebase whose performance behavior you can explain clearly.
-
-## Why This Is Still Impressive
-
-For strong systems or HFT interviews, this kind of project is compelling if it shows:
-
-- disciplined scope control
-- strong ownership of implementation details
-- careful data-structure choices
-- awareness of cache and scheduling effects
-- honest benchmarking methodology
-- reproducible experiments
-
-A small system that is genuinely understood is usually more impressive than a large system that looks half-implemented or over-abstracted.
-
-## Current Status
-
-The repository already contains the first simplified version of this direction:
-
-- `std::map`-style prototype code has been replaced by a ladder-style book
-- the queueing story has been reduced to one SPSC queue
-- the benchmark path has been simplified to producer -> queue -> matching thread
-- the project has been stripped of cloud / deployment / observability framing
-
-Still worth improving:
-
-- simplify some interfaces further
-- tighten benchmark methodology
-- document benchmark hardware and run conditions
-- reduce incidental complexity in the hot path where justified
+That is a feature, not a limitation. It keeps the system understandable and the engineering claims believable.
